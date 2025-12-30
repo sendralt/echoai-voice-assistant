@@ -1,0 +1,7 @@
+{
+  "name": "EchoAI - Advanced Voice Assistant",
+  "description": "A high-performance AI assistant featuring real-time voice-to-text and text-to-voice capabilities powered by Gemini 2.5 and 3. Experience low-latency interactions and deep reasoning in one seamless interface.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
