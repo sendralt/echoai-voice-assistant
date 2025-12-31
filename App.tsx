@@ -33,22 +33,66 @@ const StatusIndicator: React.FC<StatusIndicatorProps> = ({ label, status }) => {
   );
 };
 
+// Helper functions for localStorage persistence
+const loadFromStorage = <T,>(key: string, defaultValue: T): T => {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : defaultValue;
+  } catch {
+    return defaultValue;
+  }
+};
+
+const saveToStorage = <T,>(key: string, value: T): void => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage might be full or disabled
+  }
+};
+
 const App: React.FC = () => {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Load persisted settings from localStorage
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    loadFromStorage('echoai_messages', [])
+  );
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
   const [lastError, setLastError] = useState<boolean>(false);
-  const [activeModel, setActiveModel] = useState<ModelType>('gemini-3-flash-preview');
-  const [activeVoicePersona, setActiveVoicePersona] = useState<VoicePersona>('Zephyr');
+  const [activeModel, setActiveModel] = useState<ModelType>(() =>
+    loadFromStorage('echoai_model', 'gemini-3-flash-preview')
+  );
+  const [activeVoicePersona, setActiveVoicePersona] = useState<VoicePersona>(() =>
+    loadFromStorage('echoai_persona', 'Zephyr')
+  );
   const [liveTranscription, setLiveTranscription] = useState<{ text: string, isUser: boolean } | null>(null);
   const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
-  
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>({ volume: 0.8, speed: 1.0 });
+
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() =>
+    loadFromStorage('echoai_audio', { volume: 0.8, speed: 1.0 })
+  );
   const [showSettings, setShowSettings] = useState(false);
-  
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const liveSessionRef = useRef<{ stop: () => void } | null>(null);
+
+  // Persist settings to localStorage when they change
+  useEffect(() => {
+    saveToStorage('echoai_messages', messages);
+  }, [messages]);
+
+  useEffect(() => {
+    saveToStorage('echoai_model', activeModel);
+  }, [activeModel]);
+
+  useEffect(() => {
+    saveToStorage('echoai_persona', activeVoicePersona);
+  }, [activeVoicePersona]);
+
+  useEffect(() => {
+    saveToStorage('echoai_audio', audioSettings);
+  }, [audioSettings]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -85,7 +129,7 @@ const App: React.FC = () => {
     setIsProcessing(true);
 
     try {
-      const response = await gemini.sendChatMessage(userMessage.content, activeModel, messages);
+      const response = await gemini.sendChatMessage(userMessage.content, activeModel, messages, activeVoicePersona);
       const assistantMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: MessageRole.ASSISTANT,
@@ -122,7 +166,32 @@ const App: React.FC = () => {
       try {
         const session = await gemini.connectLive(activeVoicePersona, {
           onTranscription: (text, isUser) => setLiveTranscription({ text, isUser }),
-          onTurnComplete: () => setLiveTranscription(null),
+          onTurnComplete: (userText: string, assistantText: string) => {
+            setLiveTranscription(null);
+
+            // Save voice conversation to message history
+            if (userText.trim()) {
+              const userMessage: ChatMessage = {
+                id: Date.now().toString(),
+                role: MessageRole.USER,
+                content: userText.trim(),
+                timestamp: Date.now(),
+                isVoice: true
+              };
+              setMessages(prev => [...prev, userMessage]);
+            }
+
+            if (assistantText.trim()) {
+              const assistantMessage: ChatMessage = {
+                id: (Date.now() + 1).toString(),
+                role: MessageRole.ASSISTANT,
+                content: assistantText.trim(),
+                timestamp: Date.now(),
+                isVoice: true
+              };
+              setMessages(prev => [...prev, assistantMessage]);
+            }
+          },
           onError: () => {
             setVoiceActive(false);
             setLastError(true);
@@ -147,11 +216,11 @@ const App: React.FC = () => {
             }
             return "Command unknown.";
           }
-        });
+        }, messages); // Pass current message history to voice mode
         if (!session) { setVoiceActive(false); return; }
         liveSessionRef.current = session;
-      } catch { 
-        setVoiceActive(false); 
+      } catch {
+        setVoiceActive(false);
         setLastError(true);
       }
     }

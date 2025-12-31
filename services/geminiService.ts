@@ -1,7 +1,34 @@
 
-import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse, FunctionDeclaration, Type } from "@google/genai";
-import { ChatMessage, ModelType, GroundingSource, VoicePersona, AudioSettings } from "../types";
+import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse, FunctionDeclaration, Type, Content } from "@google/genai";
+import { ChatMessage, ModelType, GroundingSource, VoicePersona, AudioSettings, MessageRole } from "../types";
 import { decode, decodeAudioData, createBlob } from "../utils/audioUtils";
+
+// Persona personality definitions - each persona has unique traits
+const PERSONA_PERSONALITIES: Record<VoicePersona, string> = {
+  Zephyr: `You are EchoAI with the ZEPHYR persona - a sophisticated, snarky, and witty J.A.R.V.I.S.-style advanced HUD assistant with a British accent.
+You're elegant yet playful, offering dry humor and clever observations. You address the user with refined politeness but aren't afraid to add sardonic remarks.
+Example tone: "Ah, another brilliant query. I shall endeavor to enlighten you, though I suspect you already knew the answer."`,
+
+  Puck: `You are EchoAI with the PUCK persona - a mischievous, energetic, and playful AI assistant inspired by Shakespeare's trickster fairy.
+You're quick-witted, love wordplay and puns, and bring infectious enthusiasm to every interaction. You're helpful but always with a twinkle of chaos.
+Example tone: "Ooh, interesting question! Let me dig into that faster than you can say 'midsummer madness'!"`,
+
+  Kore: `You are EchoAI with the KORE persona - a calm, wise, and nurturing AI assistant with an ethereal, goddess-like presence.
+You speak with gentle authority, offering insights with patience and warmth. You're deeply knowledgeable and provide thoughtful, measured responses.
+Example tone: "An excellent question. Let us explore this together, and I shall guide you through what I discover."`,
+
+  Charon: `You are EchoAI with the CHARON persona - a mysterious, stoic, and darkly poetic AI assistant with an otherworldly gravitas.
+You speak in measured, dramatic tones with occasional philosophical musings. You're reliable and precise, but with an air of ancient wisdom.
+Example tone: "You seek knowledge from the depths. Very well. I shall ferry this information to you across the digital void."`,
+
+  Fenrir: `You are EchoAI with the FENRIR persona - a fierce, bold, and direct AI assistant with Norse warrior energy.
+You're confident, powerful, and speak with commanding authority. You value strength, clarity, and getting straight to the point.
+Example tone: "A worthy question! Let me hunt down this information and bring it back to you. Stand ready."`
+};
+
+const BASE_INSTRUCTION = `Use Google Search grounding for every query to ensure real-time accuracy.
+Remember the conversation context and refer back to previous topics when relevant.
+Maintain your persona's unique voice consistently throughout the conversation.`;
 
 const systemActions: FunctionDeclaration[] = [
   {
@@ -49,10 +76,29 @@ class GeminiService {
     }
   }
 
+  // Build system instruction for voice mode with conversation history context
+  private buildVoiceSystemInstruction(persona: VoicePersona, history: ChatMessage[]): string {
+    let instruction = `${PERSONA_PERSONALITIES[persona]}\n\nYou can clear the chat, set volume, and set speed using your tools. ${BASE_INSTRUCTION}`;
+
+    // Add conversation history context if available
+    if (history.length > 0) {
+      // Include last 10 messages for context (to avoid token limits)
+      const recentHistory = history.slice(-10);
+      const historyContext = recentHistory.map(msg =>
+        `${msg.role === MessageRole.USER ? 'User' : 'Assistant'}: ${msg.content}`
+      ).join('\n');
+
+      instruction += `\n\n--- Previous Conversation Context ---\n${historyContext}\n--- End of Context ---\nContinue the conversation naturally, referencing previous topics when relevant.`;
+    }
+
+    return instruction;
+  }
+
   async sendChatMessage(
     text: string,
     model: ModelType = 'gemini-3-flash-preview',
-    history: ChatMessage[] = []
+    history: ChatMessage[] = [],
+    persona: VoicePersona = 'Zephyr'
   ): Promise<{ text: string, sources?: GroundingSource[] }> {
     const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -63,11 +109,26 @@ class GeminiService {
       apiKey: apiKey as string,
     });
 
+    // Build conversation history for context
+    const conversationContents: Content[] = history.map(msg => ({
+      role: msg.role === MessageRole.USER ? 'user' : 'model',
+      parts: [{ text: msg.content }]
+    }));
+
+    // Add current message
+    conversationContents.push({
+      role: 'user',
+      parts: [{ text }]
+    });
+
+    // Build persona-specific system instruction
+    const systemInstruction = `${PERSONA_PERSONALITIES[persona]}\n\n${BASE_INSTRUCTION}`;
+
     const response: GenerateContentResponse = await ai.models.generateContent({
       model: model,
-      contents: text,
+      contents: conversationContents,
       config: {
-        systemInstruction: "You are EchoAI, a J.A.R.V.I.S. style advanced HUD assistant. Use Google Search grounding for every query to ensure real-time accuracy. Maintain a helpful, sophisticated, and concise tone.",
+        systemInstruction,
         tools: [{ googleSearch: {} }]
       },
     });
@@ -75,7 +136,7 @@ class GeminiService {
     const outputText = response.text || "NO_RESPONSE_RECEIVED";
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
     const sources: GroundingSource[] = [];
-    
+
     if (groundingChunks) {
       groundingChunks.forEach((chunk: any) => {
         if (chunk.web && chunk.web.uri) {
@@ -141,10 +202,11 @@ class GeminiService {
     voicePersona: VoicePersona = 'Zephyr',
     callbacks: {
       onTranscription: (text: string, isUser: boolean) => void;
-      onTurnComplete: () => void;
+      onTurnComplete: (userText: string, assistantText: string) => void;
       onError: (err: any) => void;
       onToolCall?: (name: string, args: any) => Promise<any>;
-    }
+    },
+    history: ChatMessage[] = []
   ) {
     const apiKey = process.env.API_KEY as string;
     if (!apiKey) {
@@ -255,7 +317,8 @@ class GeminiService {
           }
 
           if (message.serverContent?.turnComplete) {
-            callbacks.onTurnComplete();
+            // Pass both user and assistant transcriptions to save to history
+            callbacks.onTurnComplete(currentInputText, currentOutputText);
             currentInputText = "";
             currentOutputText = "";
           }
@@ -279,7 +342,7 @@ class GeminiService {
         tools: [{ functionDeclarations: systemActions }],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        systemInstruction: "You are a real-time HUD voice assistant. You can clear the chat, set volume, and set speed using your tools. Be efficient and sophisticated.",
+        systemInstruction: this.buildVoiceSystemInstruction(voicePersona, history),
       }
     });
 
